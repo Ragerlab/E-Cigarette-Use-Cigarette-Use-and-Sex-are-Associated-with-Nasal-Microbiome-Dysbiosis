@@ -1,0 +1,22 @@
+"Sample","Species","Abundance"
+"1","Ecig","< 1% other taxa",4.50883811343756
+"2","Ecig","Haemophilus parainfluenzae",3.01962011762186
+"3","Ecig","Prevotella melaninogenica",0.622703984976031
+"4","Ecig","Propionibacterium acnes",50.7602589657842
+"5","Ecig","Staphylococcus aureus",32.8451641599262
+"6","Ecig","Staphylococcus epidermidis",6.87939640544949
+"7","Ecig","Veillonella dispar",1.36401825280464
+"8","Nonsmoker","< 1% other taxa",3.54869509866327
+"9","Nonsmoker","Haemophilus parainfluenzae",0.547876693643721
+"10","Nonsmoker","Prevotella melaninogenica",0.341002091479494
+"11","Nonsmoker","Propionibacterium acnes",84.0024552150586
+"12","Nonsmoker","Staphylococcus aureus",4.29207965808857
+"13","Nonsmoker","Staphylococcus epidermidis",6.11075747931254
+"14","Nonsmoker","Veillonella dispar",1.15713376375375
+"15","Smoker","< 1% other taxa",5.32683510751999
+"16","Smoker","Haemophilus parainfluenzae",1.90030353554786
+"17","Smoker","Prevotella melaninogenica",1.62241887905605
+"18","Smoker","Propionibacterium acnes",46.6910350134668
+"19","Smoker","Staphylococcus aureus",38.7649095806079
+"20","Smoker","Staphylococcus epidermidis",4.32431276986875
+"21","Smoker","Veillonella dispar",1.37018511393271

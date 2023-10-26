@@ -1,0 +1,384 @@
+---
+title: "Nasal Lavage Fluid Mediator Analysis"
+output: html_document
+---
+
+# Set up workspace
+
+```{r message = FALSE, warning = FALSE}
+# Clear global environment
+rm(list=ls())
+
+# Set theme
+theme_set(theme_bw())
+
+# Load packages
+library(tidyverse) # for data organization and manipulation
+library(janitor) # for data cleaning
+library(openxlsx) # for reading in files and writing out results
+library(ggpubr) # for making Q-Q plots with ggplot 
+library(rstatix) # for statistical testing
+library(FSA) # package that contains Dunn test function
+library(pheatmap) # for heatmaps
+library(viridis) # for heatmaps
+```
+
+# Import and clean data
+
+Mediator data:
+```{r}
+nlf_mediator_df_orig <- read.csv("1_InputData/2020_06_11 NLF Data.csv") 
+
+nlf_mediator_df <- nlf_mediator_df_orig %>%
+  
+  # Omit subject with missing data
+  na.omit() %>%
+  
+  # First name cleaning
+  clean_names() %>%
+  
+  # Convert everything to pg/mL
+  mutate_at(vars(contains("ug")), ~ .x*1000000) %>%
+  mutate_at(vars(contains("ng")), ~ .x*1000) %>%
+  
+  # Second column name cleaning step
+  rename_with(~gsub(x = .,"_.*","")) %>%
+  dplyr::rename("IL-8" = "il", "IgA" = "total", "Neutrophil Elastase" = "neutrophil", "sample_id" = "sample",
+         "DEFB4A2" = "defb4a", "DEFB1" = "defb1", "Lactoferrin" = "lactoferrin", "Lysozyme" = "lysozyme")
+```
+
+Metadata:
+```{r}
+metadata <- read.xlsx("1_InputData/ELFmetadata.xlsx") %>%
+  rename("sample_id" = "#SampleID") %>%
+  filter(sample_id %in% nlf_mediator_df$sample_id)
+```
+
+# Test for normality of each mediator
+
+Histograms:
+```{r}
+nlf_mediator_df %>% pivot_longer(!sample_id, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(value)) +
+  geom_histogram(fill = "gray40", color = "black", binwidth = function(x) {(max(x) - min(x))/25}) +
+  facet_wrap(~ variable, scales = "free", nrow = 2) +
+  labs(y = "# of Observations", x = "Value")
+```
+Q-Q Plots:
+```{r}
+nlf_mediator_df %>% pivot_longer(!sample_id, names_to = "variable", values_to = "value") %>%
+  ggqqplot( x = "value", facet.by = "variable", ggtheme = theme_bw(), scales = "free", nrow = 2)
+```
+Shapiro-Wilk test:
+```{r}
+# Apply Shapiro Wilk test
+shapiro_res <-  apply(nlf_mediator_df %>% select(-sample_id), 2, shapiro.test)
+
+# Create results data frame
+shapiro_res <- do.call(rbind.data.frame, shapiro_res)
+
+# Clean data frame
+shapiro_res <- shapiro_res %>% 
+  
+  ## Add normality conclusion
+  mutate(normal = ifelse(p.value < 0.05, F, T)) %>%
+  
+  ## Remove columns that do not contain informative data
+  select(c(p.value, normal)) 
+
+# View cleaned up data frame
+shapiro_res
+```
+
+# Test for significant differences between groups
+
+```{r}
+# Prepare data frame by merging mediator data and metadata
+nlf_mediator_df_forstats <- nlf_mediator_df %>%
+  left_join(metadata, by = "sample_id")
+```
+
+
+## Between tobacco product use groups
+
+First, perform Kruskal-Wallis test to see if there are overall significant differences in mediator levels between exposure groups.Results demonstrate IL-8 is the only mediator with a close-to-significant overall p-value.
+```{r}
+# Perform Kruskal-Wallis test
+kruskal_res_subjgroup <- nlf_mediator_df_forstats %>%
+  dplyr::select(c(DEFB4A2:'IL-8', SubjectGroup)) %>%
+  pivot_longer(!SubjectGroup, names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  do(tidy(kruskal.test(x = .$Value, g = .$SubjectGroup))) %>%
+  dplyr::select(c(Variable, p.value))
+
+# View results
+kruskal_res_subjgroup
+```
+```{r}
+# Function to add significant numbers to data frame
+signif.num <- function(x) {
+  symnum(x, corr = FALSE, na = FALSE, legend = FALSE,
+         cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1), 
+         symbols = c("***", "**", "*", "+", " "))
+}
+
+# Function for Dunn test and nicely formatted results
+dunn.test <- function(variable, group, data) {
+  res <- dunnTest(as.formula(paste0(variable, "~", group)), data = data, method = "bh")
+  res <- data.frame(res$res)
+  res <- format(res, scientific = FALSE)
+  res$AdjSignif <- signif.num(as.numeric(res$P.adj))
+  res
+}
+
+IL8_dunn_res <- dunn.test("il_8", "subject_group", nlf_mediator_df_forstats %>% clean_names)
+```
+
+
+## Between sexes
+
+```{r warning = FALSE}
+# Create results data frame
+wilcox_res_sex <- data.frame()
+
+# Define endpoints
+mediators <- names(nlf_mediator_df_forstats %>% clean_names %>% select(c(defb4a2:il_8)))
+
+# Iterate through Wilcox test
+for (i in 1:length(mediators)) {
+  
+  # Assign a name to the endpoint variable.
+  endpoint <- mediators[i]
+  
+  # Run wilcox test and store in results data frame.
+  res <- wilcox.test(as.formula(paste0(endpoint, "~ sex", sep = "")), 
+                     data = nlf_mediator_df_forstats %>% clean_names, 
+                     paired = FALSE)
+  
+  res_df <- data.frame(res$p.value) %>% 
+    mutate("variable" = endpoint)
+  
+  wilcox_res_sex <- rbind(wilcox_res_sex, res_df)
+}
+
+# Clean data frame
+wilcox_res_sex <- wilcox_res_sex %>% relocate(variable, .before = res.p.value)
+
+# Pull out mediators with significant differences by sex
+sex_mediators <- wilcox_res_sex %>%
+  filter(res.p.value < 0.05) %>%
+  pull(variable)
+```
+
+## By sex and exposure
+
+### Normality assessment with log2-transformed data
+
+```{r}
+# Log2 transform data
+nlf_mediator_df_log2 <- nlf_mediator_df %>%
+  mutate(across(where(is.numeric), ~ log2(.x + 1)))
+
+# Plot histograms
+nlf_mediator_df_log2 %>% pivot_longer(!sample_id, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(value)) +
+  geom_histogram(fill = "gray40", color = "black", binwidth = function(x) {(max(x) - min(x))/25}) +
+  facet_wrap(~ variable, scales = "free", nrow = 2) +
+  labs(y = "# of Observations", x = "Value")
+```
+```{r}
+# Plot Q-Q plots
+nlf_mediator_df_log2 %>% pivot_longer(!sample_id, names_to = "variable", values_to = "value") %>%
+  ggqqplot( x = "value", facet.by = "variable", ggtheme = theme_bw(), scales = "free", nrow = 2)
+```
+
+```{r}
+# Apply Shapiro Wilk test
+shapiro_res <-  apply(nlf_mediator_df_log2 %>% select(-sample_id), 2, shapiro.test)
+
+# Create results data frame
+shapiro_res <- do.call(rbind.data.frame, shapiro_res)
+
+# Clean data frame
+shapiro_res <- shapiro_res %>% 
+  
+  ## Add normality conclusion
+  mutate(normal = ifelse(p.value < 0.05, F, T)) %>%
+  
+  ## Remove columns that do not contain informative data
+  select(c(p.value, normal)) 
+
+# View cleaned up data frame
+shapiro_res
+```
+
+### Two-way ANOVA with log2 data
+
+```{r}
+# Add metadata to log2 data frame
+nlf_mediator_df_log2 <- nlf_mediator_df_log2 %>%
+  left_join(metadata, by = "sample_id") %>%
+  clean_names() %>%
+  mutate(subject_group = as.factor(subject_group))
+
+# Define endpoints
+mediators <- names(nlf_mediator_df_log2 %>% select(c(defb4a2:il_8)))
+
+# Make a data frame where you will store your results
+aov_group_sex <- data.frame(Factor = c("subject_group", "sex", "sex:subject_group"))
+
+# Repeat this for loop as many times as there are items in the endpoints vector created above.
+for (i in 1:length(mediators)) {
+  
+  # Assign a name to the endpoint variable.
+  endpoint <- mediators[i]
+  
+  # Run an two-way mixed ANOVA and store results in res.aov
+  res.aov <- anova_test(data = nlf_mediator_df_log2, 
+                        dv = paste0(endpoint),
+                        wid = sample_id,
+                        between = c(sex, subject_group)) 
+    
+  # Extract the results we are interested in.
+  res_df <- data.frame(get_anova_table(res.aov)) %>%
+    select(c(Effect, p)) %>%
+    rename("Factor" = "Effect")
+  
+  # Rename columns in the results data frame so that the output is more nicely formatted.
+  names(res_df)[names(res_df) == 'p'] <- noquote(paste0(endpoint))
+  
+  # Bind the results to the results data frame.
+  aov_group_sex <- merge(aov_group_sex, res_df, by = "Factor", all.y = TRUE)
+}
+```
+
+Post-hoc testing with Tukey's HSD:
+```{r}
+# Add combined sex and subject group column
+nlf_mediator_df_log2 <- nlf_mediator_df_log2 %>%
+  unite(SubjectGroup_Sex, subject_group, sex, sep = "_", remove = FALSE)
+
+# Define endpoints
+mediators <- names(nlf_mediator_df_log2 %>% select(c(defb4a2:il_8)))
+
+# Create data frame
+pairwise_t_group_sex <- data.frame()
+
+# Repeat this for loop as many times as there are items in the endpoints vector created above.
+for (i in 1:length(mediators)) {
+  
+  # Assign a name to the endpoint variable.
+  endpoint <- mediators[i]
+  
+  # Run an two-way mixed ANOVA and store results in res.aov
+  res <- nlf_mediator_df_log2 %>% t_test(as.formula(paste0(endpoint, " ~ SubjectGroup_Sex")))
+    
+  # Add results to results df
+  pairwise_t_group_sex <- rbind(pairwise_t_group_sex, res)
+}
+```
+
+# Plotting heatmaps for figure panel 1
+
+By group:
+```{r}
+# Prepare data matrix
+nlf_mediator_df_heatmap_group <- nlf_mediator_df_forstats %>%
+  mutate(SubjectGroup = as.factor(recode(SubjectGroup, "Smoker" = "SM", "Nonsmoker" = "NS", "Ecig" = "EC"))) %>%
+  mutate(SubjectGroup = fct_relevel(SubjectGroup, "NS", "SM", "EC")) %>%
+  group_by(SubjectGroup) %>%
+  summarise(across(DEFB4A2:'IL-8', ~ mean(.x))) %>%
+  column_to_rownames("SubjectGroup") %>%
+  select(order(colnames(.))) %>%
+  t() 
+
+# Make heatmap
+mediator_heatmap_group <- pheatmap(nlf_mediator_df_heatmap_group, 
+         color = plasma(100),
+         angle_col = c("0"), 
+         border_color = "black",
+         cellwidth = 30,
+         cellheight = 22,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         fontsize_row = 12,
+         scale = 'row',
+         fontsize_col = 12)
+
+mediator_heatmap_group
+
+pdf("2_CodeOutput/Heatmap_ByGroup.pdf",
+    width = 7, height = 3)
+mediator_heatmap_group
+invisible(dev.off())
+```
+
+By sex:
+```{r}
+nlf_mediator_df_heatmap_sex <- nlf_mediator_df_forstats %>%
+  mutate(Sex = fct_relevel(as.factor(Sex), "Male", "Female")) %>%
+  group_by(Sex) %>%
+  summarise(across(DEFB4A2:'IL-8', ~ mean(.x))) %>%
+  column_to_rownames("Sex") %>%
+  select(order(colnames(.))) %>%
+  t() 
+
+# Make heatmap
+mediator_heatmap_sex <- pheatmap(nlf_mediator_df_heatmap_sex, 
+         color = plasma(100),
+         angle_col = c("0"), 
+         border_color = "black",
+         cellwidth = 45,
+         cellheight = 22,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         fontsize_row = 12,
+         scale = 'row',
+         fontsize_col = 12)
+
+mediator_heatmap_sex
+
+pdf("2_CodeOutput/Heatmap_BySex.pdf",
+    width = 7, height = 3)
+mediator_heatmap_sex
+invisible(dev.off())
+```
+
+By sex and group:
+```{r}
+nlf_mediator_df_heatmap_gs <- nlf_mediator_df_log2 %>%
+  dplyr::rename("DEFB4A2" = "defb4a2", "DEFB1" = "defb1", "Lysozyme" = "lysozyme", "Lactoferrin" = "lactoferrin", 
+                "IL-8" = "il_8", "Neutrophil Elastase" = "neutrophil_elastase", "IgA" = "ig_a") %>%
+  mutate(subject_group = as.factor(recode(subject_group, "Smoker" = "SM", "Nonsmoker" = "NS", "Ecig" = "EC"))) %>%
+  mutate(sex = fct_relevel(as.factor(recode(sex, "Male" = "M", "Female" = "F")))) %>%
+  unite(SubjectGroup_Sex, subject_group, sex, sep = "_") %>%
+  group_by(SubjectGroup_Sex) %>%
+  summarise(across(DEFB4A2:'IL-8', ~ mean(.x))) %>%
+  column_to_rownames("SubjectGroup_Sex") %>%
+  select(order(colnames(.))) %>%
+  t() %>% as.data.frame() %>%
+  relocate(c(NS_M, NS_F, SM_M, SM_F, EC_M), .before = EC_F)
+
+# Make heatmap
+mediator_heatmap_gs <- pheatmap(nlf_mediator_df_heatmap_gs, 
+         color = plasma(100),
+         angle_col = c("0"), 
+         border_color = "black",
+         cellwidth = 15,
+         cellheight = 22,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         fontsize_row = 12,
+         scale = 'row',
+         fontsize_col = 12)
+
+mediator_heatmap_gs
+
+pdf("2_CodeOutput/Heatmap_ByGroupandSex.pdf",
+    width = 5, height = 3)
+mediator_heatmap_gs
+invisible(dev.off())
+```
+
+
+

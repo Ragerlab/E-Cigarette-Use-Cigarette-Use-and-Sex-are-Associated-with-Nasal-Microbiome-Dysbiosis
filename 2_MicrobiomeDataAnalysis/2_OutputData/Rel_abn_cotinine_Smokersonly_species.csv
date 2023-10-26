@@ -1,0 +1,19 @@
+"Sample","Species","Abundance"
+"1","high","< 1% other taxa",2.5353641791998
+"2","high","Corynebacterium durum",0.242679694734489
+"3","high","Haemophilus parainfluenzae",0.392757927004502
+"4","high","Prevotella melaninogenica",0.546029313152601
+"5","high","Propionibacterium acnes",36.9543698310822
+"6","high","Rothia mucilaginosa",0.258645464124916
+"7","high","Staphylococcus aureus",55.6279337101255
+"8","high","Staphylococcus epidermidis",3.01753041479069
+"9","high","Veillonella dispar",0.424689465785356
+"10","low","< 1% other taxa",6.68606530876172
+"11","low","Corynebacterium durum",1.2479793081151
+"12","low","Haemophilus parainfluenzae",4.95311994827029
+"13","low","Prevotella melaninogenica",3.80213385063046
+"14","low","Propionibacterium acnes",66.4080181053993
+"15","low","Rothia mucilaginosa",2.03039120594892
+"16","low","Staphylococcus aureus",4.6168768186227
+"17","low","Staphylococcus epidermidis",6.97057872615584
+"18","low","Veillonella dispar",3.2848367280957

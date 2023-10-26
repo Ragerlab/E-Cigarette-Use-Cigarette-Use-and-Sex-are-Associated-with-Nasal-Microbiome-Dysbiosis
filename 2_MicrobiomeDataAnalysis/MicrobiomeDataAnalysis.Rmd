@@ -1,0 +1,914 @@
+---
+title: "Microbiome Data Analysis"
+output: html_document
+---
+
+# Prepare workspace
+
+If needed, install the following packages directly from Github or BioConductor. Other packages listed under "load packages" can be installed using base R's `install.packages()`. To install some of the devtools and BiocManager packages in R, you will need XCode and GNU Fortran. For more information, see [here](https://mac.r-project.org/tools/).
+```{r message = FALSE, eval = FALSE, warning = FALSE}
+# From Github
+
+library(devtools)
+devtools::install_github("jbisanz/qiime2R")
+devtools::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+devtools::install_github('schuyler-smith/phylosmith')
+devtools::install_github("zdk123/SpiecEasi")
+devtools::install_github("GraceYoon/SPRING")
+
+devtools::install_github("stefpeschel/NetCoMi", 
+                         ref = "develop",
+                         dependencies = c("Depends", "Imports", "LinkingTo"),
+                         repos = c("https://cloud.r-project.org/",
+                                   BiocManager::repositories()))
+
+remotes::install_github("david-barnett/microViz")
+
+# From BioConductor
+library(BiocManager)
+BiocManager::install('phyloseq')
+BiocManager::install('ANCOMBC') 
+BiocManager::install('pairwiseAdonis')
+BiocManager::install('MicrobiotaProcess')
+BiocManager::install('ggtree')
+BiocManager::install('scales')
+BiocManager::install('igraph')
+BiocManager::install('limma')
+```
+
+
+```{r messsage = FALSE, warning = FALSE}
+# Clear global environment
+rm(list=ls())
+
+# Load packages
+library(pairwiseAdonis)
+library(tidyverse)
+library(qiime2R)
+library(vegan) # for offset labels
+library(phyloseq) # for visualizing phylogenetic trees
+library(ANCOMBC) # for manipulating phylogenetic trees
+library(microViz)
+library(phylosmith)
+library(RColorBrewer)
+library(pals)
+library(randomcoloR)
+library(data.table)
+library(MicrobiotaProcess)
+library(ggtree)
+library(scales)
+library(igraph)
+library(NetCoMi)
+library(limma)
+
+# Set theme
+theme_set(theme_bw())
+```
+
+# Import data, clean, and rarefy
+
+Import data:
+```{r}
+metadata_elf <- read.delim2(file = "1_InputData/ELFmetadata.txt", sep = "\t", header = T, row.names = 1, 
+                        comment.char = "") %>% rownames_to_column("SampleID")
+
+metadata_nlf <- read.csv("1_InputData/NLFmetadata.csv")
+
+metadata <- full_join(metadata_elf, metadata_nlf, by = "SampleID") %>% column_to_rownames("SampleID")
+
+otu <- read.csv(file = "1_InputData/OTU_Table_contaminantsFilteredOut.csv", row.names = 1)
+
+taxonomy <- read.table(file = "1_InputData/taxonomy.tsv", sep = "\t", header = T ,row.names = 1, comment.char = "")
+```
+
+Clean taxonomy
+```{r warning = FALSE}
+tax <- taxonomy %>%
+  select(Taxon) %>% 
+  separate(Taxon, c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), "; ")
+
+
+tax.clean <- data.frame(row.names = row.names(tax),
+                        Kingdom = str_replace(tax[,1], "k__",""),
+                        Phylum = str_replace(tax[,2], "p__",""),
+                        Class = str_replace(tax[,3], "c__",""),
+                        Order = str_replace(tax[,4], "o__",""),
+                        Family = str_replace(tax[,5], "f__",""),
+                        Genus = str_replace(tax[,6], "g__",""),
+                        Species = str_replace(tax[,7], "s__",""),
+                        stringsAsFactors = FALSE)
+
+tax.clean[is.na(tax.clean)] <- ""
+tax.clean[tax.clean=="__"] <- ""
+
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,7] != ""){
+    tax.clean$Species[i] <- paste(tax.clean$Genus[i], tax.clean$Species[i], sep = " ")
+  } else if (tax.clean[i,2] == ""){
+    kingdom <- paste("Unclassified", tax.clean[i,1], sep = " ")
+    tax.clean[i, 2:7] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Unclassified", tax.clean[i,2], sep = " ")
+    tax.clean[i, 3:7] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Unclassified", tax.clean[i,3], sep = " ")
+    tax.clean[i, 4:7] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Unclassified", tax.clean[i,4], sep = " ")
+    tax.clean[i, 5:7] <- order
+  } else if (tax.clean[i,6] == ""){
+    family <- paste("Unclassified", tax.clean[i,5], sep = " ")
+    tax.clean[i, 6:7] <- family
+  } else if (tax.clean[i,7] == ""){
+    tax.clean$Species[i] <- paste("Unclassified ",tax.clean$Genus[i], sep = " ")
+  }
+}
+```
+
+Merge files:
+```{r}
+OTU = otu_table(as.matrix(otu), taxa_are_rows = TRUE)
+TAX = phyloseq::tax_table(as.matrix(tax.clean))
+SAMPLE <- sample_data(metadata)
+TREE = read_tree("1_InputData/rooted-tree.nwk")
+
+ps <- phyloseq(OTU, TAX, SAMPLE, TREE)
+```
+
+Rarefy data:
+```{r}
+# Alpha rarefaction
+set.seed(111) # keep result reproductive
+tab <- otu_table(ps)
+class(tab) <- "matrix"
+tab <- t(tab)
+
+# Plot rarefaction curve 
+rarecurve(tab, step=50, lwd=1, ylab="OTU", xlab = "Sampling depth", cex=1)
+# Plot rarefaction curve setting the max sampling depth to 10000
+rarecurve(tab, step=50, lwd=2, ylab="OTU", xlab = "Sampling depth", cex=1.5, xlim=c(0, 50000))
+
+## Rarefyfull data at a given sampling depth 
+ps.rarefied = rarefy_even_depth(ps, rngseed=1, sample.size=10000, replace=F)
+```
+# Alpha Diversity Analysis
+
+```{r}
+# Plot estimates for Simpson and Shannon index 
+plot_richness(ps.rarefied, x="Sex", measures=c("Simpson", "Shannon")) +
+  geom_boxplot() +
+  theme_classic() +
+  theme(strip.background = element_blank(), axis.text.x.bottom = element_text(angle = -90))
+
+# Calculate raw estimates for Simpson and Shannon index 
+rich = estimate_richness(ps.rarefied, measures = c("Simpson", "Shannon"))
+
+# merge Simpson and Shannon index colum with metadata
+metadata2 <- tibble::rownames_to_column(metadata, "sample.id")
+rich2 <- tibble::rownames_to_column(rich, "sample.id")
+
+metadata2<-
+  metadata2 %>% 
+  left_join(rich2)
+
+#Export metadata with alpha diversity metrics and plot in GraphPad Prism
+
+write.table(file = '2_OutputData/alpha_diversity.csv', x = metadata2, sep=",")  
+
+# To confirm plotting metrics and p-values from graphpad prism
+wilcox.simpson <- pairwise.wilcox.test(rich$Simpson, 
+                                       sample_data(ps.rarefied)$Sex, 
+                                       p.adjust.method = "BH")
+
+tab.simpson <- wilcox.simpson$p.value %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column(var = "group1") %>%
+  gather(key="group2", value="p.adj", -group1) %>%
+  na.omit()
+tab.simpson
+```
+
+# Beta Diversity, PcoA, and PERMANOVA
+
+## By Sex
+
+PCoA:
+```{r}
+dist = phyloseq::distance(ps.rarefied, method="unifrac")
+ordination = ordinate(ps.rarefied, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied, ordination, color = "Sex") +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right")
+```
+
+PERMANOVA:
+```{r}
+metadata2 <- data.frame(sample_data(ps.rarefied))
+test.adonis <- adonis2(dist ~ Sex, data = metadata2)
+test.adonis
+```
+Pairwise PERMANOVA by sex:
+```{r}
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$Sex)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+## By Subject Group
+
+PCoA:
+```{r}
+dist = phyloseq::distance(ps.rarefied, method="unifrac")
+ordination = ordinate(ps.rarefied, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied, ordination, color = "SubjectGroup") +
+  geom_point(size = 4) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right")
+```
+
+PERMANOVA:
+```{r}
+metadata2 <- data.frame(sample_data(ps.rarefied))
+test.adonis <- adonis2(dist ~ SubjectGroup, data = metadata2)
+test.adonis
+```
+
+Pairwise PERMANOVA:
+```{r}
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$SubjectGroup)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+
+## By Subject Group and Sex
+
+Filter data frames:
+```{r}
+ps.rarefied.smok <- subset_samples(ps.rarefied, SubjectGroup=="Smoker")
+ps.rarefied.ecig <- subset_samples(ps.rarefied, SubjectGroup=="Ecig")
+ps.rarefied.nonsmok <- subset_samples(ps.rarefied, SubjectGroup=="Nonsmoker")
+```
+
+### Nonsmokers
+```{r}
+# PCoA
+dist = phyloseq::distance(ps.rarefied.nonsmok, method="unifrac")
+ordination = ordinate(ps.rarefied.nonsmok, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied.nonsmok, ordination, color = "Sex") +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right")
+
+# PERMANOVA
+metadata2 <- data.frame(sample_data(ps.rarefied.nonsmok))
+test.adonis <- adonis2(dist ~ Sex, data = metadata2)
+test.adonis
+
+# Pairwise PERMANOVA
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$Sex)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+Writing out figure for manuscript:
+```{r}
+nonsmok_mvsf_pcoa <- plot_ordination(ps.rarefied.nonsmok, ordination, color = "Sex", shape = "Sex") +
+  scale_color_manual(values = c("red", "blue")) +
+  scale_shape_manual(values = c(15,16)) +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(legend.position = "right")
+
+ggsave("3_OutputFigures/FigS1A_Nonsmoker_Sex_PCoA.png", device = "png", width = 7, height = 5, units = "in")
+```
+### Smokers
+
+```{r}
+# PCoA
+dist = phyloseq::distance(ps.rarefied.smok, method="unifrac")
+ordination = ordinate(ps.rarefied.smok, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied.smok, ordination, color = "Sex") +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right")
+
+# PERMANOVA
+metadata2 <- data.frame(sample_data(ps.rarefied.smok))
+test.adonis <- adonis2(dist ~ Sex, data = metadata2)
+test.adonis
+
+# Pairwise PERMANOVA
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$Sex)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+Writing out figure for manuscript:
+```{r}
+smok_mvsf_pcoa <- plot_ordination(ps.rarefied.smok, ordination, color = "Sex", shape = "Sex") +
+  scale_color_manual(values = c("red", "blue")) +
+  scale_shape_manual(values = c(15,16)) +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(legend.position = "right")
+
+ggsave("3_OutputFigures/Fig3A_Smoker_Sex_PCoA.png", device = "png", width = 7, height = 5, units = "in")
+```
+
+### E-Cig Users
+
+```{r}
+# PCoA
+dist = phyloseq::distance(ps.rarefied.ecig, method="unifrac")
+ordination = ordinate(ps.rarefied.ecig, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied.ecig, ordination, color = "Sex") +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right")
+
+# PERMANOVA
+metadata2 <- data.frame(sample_data(ps.rarefied.ecig))
+test.adonis <- adonis2(dist ~ Sex, data = metadata2)
+test.adonis
+
+# Pairwise PERMANOVA
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$Sex)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+Writing out figure for manuscript:
+```{r}
+smok_mvsf_pcoa <- plot_ordination(ps.rarefied.ecig, ordination, color = "Sex", shape = "Sex") +
+  scale_color_manual(values = c("red", "blue")) +
+  scale_shape_manual(values = c(15,16)) +
+  geom_point(size = 4) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(legend.position = "right")
+
+ggsave("3_OutputFigures/Fig3B_Ecig_Sex_PCoA.png", device = "png", width = 7, height = 5, units = "in")
+```
+
+# Relative Abundance By Group and Sex
+
+## By Group
+```{r warning = FALSE, message = FALSE}
+# Averaging relative abundance by the variable "SubjectGroup"
+ps_mergedgroup <- merge_samples(ps.rarefied, "SubjectGroup")
+sample_data(ps_mergedgroup)$SubjectGroup <- levels(sample_data(ps.rarefied)$SubjectGroup)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_Smoking_species.csv", x = ps.melt_sum, sep=",") 
+```
+
+## By Sex
+
+```{r warning = FALSE, message = FALSE}
+# Averaging relative abundance by the variable "Sex"
+ps_mergedgroup <- merge_samples(ps.rarefied, "Sex")
+sample_data(ps_mergedgroup)$Sex <- levels(sample_data(ps.rarefied)$Sex)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_Sex_species.csv", x = ps.melt_sum, sep=",")  
+```
+
+## By Group and Sex
+
+Smokers:
+```{r warning = FALSE, message = FALSE}
+# Averaging relative abundance by the variable "Sex"
+ps_mergedgroup <- merge_samples(ps.rarefied.smok, "Sex")
+sample_data(ps_mergedgroup)$Sex <- levels(sample_data(ps.rarefied.smok)$Sex)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_Sex_smokersonly_species.csv", x = ps.melt_sum, sep=",")  
+```
+E-cig Users:
+```{r warning = FALSE, message = FALSE}
+# Averaging relative abundance by the variable "Sex"
+ps_mergedgroup <- merge_samples(ps.rarefied.ecig, "Sex")
+sample_data(ps_mergedgroup)$Sex <- levels(sample_data(ps.rarefied.ecig)$Sex)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_Sex_Ecigonly_species.csv", x = ps.melt_sum, sep=",") 
+```
+
+Nonsmokers:
+```{r warning = FALSE, message = FALSE}
+# Averaging relative abundance by the variable "Sex"
+ps_mergedgroup <- merge_samples(ps.rarefied.nonsmok, "Sex")
+sample_data(ps_mergedgroup)$Sex <- levels(sample_data(ps.rarefied.nonsmok)$Sex)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_Sex_NonSmokersonly_species.csv", x = ps.melt_sum, sep=",")  
+```
+
+# Microbial network analysis (species level)
+```{r}
+# Agglomerate to genus level
+ps_genus <- tax_glom(ps.rarefied, taxrank = "Species")
+ps_genus <- tax_select(ps_genus, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+
+# Taxonomic table
+taxtab <- as(phyloseq::tax_table(ps_genus), "matrix")
+
+# Rename taxonomic table and make Rank6 (genus) unique
+ps_genus <- renameTaxa(ps_genus, pat = "<name>", 
+                       substPat = "<name>_<subst_name>(<subst_R>)",
+                       numDupli = "Species")
+# Split groups to compare
+
+amgut_male <- phyloseq::subset_samples(ps_genus, 
+                                       Sex == "Male")
+amgut_female <- phyloseq::subset_samples(ps_genus, 
+                                         Sex == "Female")
+
+#Assign names to taxa codes
+
+amgut_male@tax_table@.Data <- taxtab
+rownames(amgut_male@otu_table@.Data) <- taxtab[, "Species"]
+amgut_female@tax_table@.Data <- taxtab
+rownames(amgut_female@otu_table@.Data) <- taxtab[, "Species"]
+
+
+## get the 50 nodes with the highest variance to plot
+n_male <- phyloseq::nsamples(amgut_male)
+
+# Construct the network
+net_season <- netConstruct(data = amgut_male,
+                           data2 = amgut_female,
+                           filtTax = "highestVar",
+                           filtTaxPar = list(highestVar = 30),
+                           filtSamp = "highestFreq",
+                           filtSampPar = list(highestFreq = n_male),
+                           measure = "pearson",
+                           measurePar = list(nlambda=30, 
+                                             rep.num=30),
+                           normMethod = "clr", 
+                           zeroMethod = "multRepl",
+                           sparsMethod = "threshold",
+                           thresh = 0.3,
+                           verbose = 2,
+                           seed = 123456)
+
+# Analyze the network
+props_season <- netAnalyze(net_season, 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+summary(props_season)
+
+# Plot the network
+plot(props_season,
+     sameLayout = TRUE,
+     shortenLabels = "intelligent",
+     rmSingles = "inboth",
+     labelLength = 20,
+     labelPattern = c(5, "'", 3, "'", 3),
+     labelScale = FALSE,
+     nodeSize = "mclr",
+     nodeColor = "cluster",
+     sameClustCol = TRUE,
+     posCol = "darkturquoise",
+     negCol = "orange",
+     cexNodes = 1.5, 
+     cexLabels = 1.2,
+     cexHubLabels = 0.6,
+     cexTitle = 1.5,
+     groupNames = c("Male", "Female"),
+     hubBorderCol  = "gray40")
+
+legend("bottom", title = "estimated association:", legend = c("+","-"), 
+       col = c("darkturquoise","orange"), inset = 0.02, cex = 3.2, lty = 1, lwd = 3, 
+       bty = "n", horiz = TRUE)
+```
+
+CRISTIAN IF YOU COULD ADD CODE HERE SHOWING HOW YOU EXPORTED TO PDF THAT WOULD BE GREAT! I TRIED BUT COULDN"T GET THE TEXT TO WRAP LIKE YOU DID! 
+
+# Differential abundance analysis with ANCOM-BC2
+
+## Sex
+
+```{r}
+## Preprocessing of dataset
+sample_data(ps.rarefied)$Sex <- as.factor(sample_data(ps.rarefied)$Sex) # factorize
+ps.taxa <- tax_glom(ps.rarefied, taxrank = 'Genus', NArm = FALSE)
+
+# Assign the "Comparator" group to be used in ancombc2
+sample_data(ps.taxa)$Sex <- as.factor(sample_data(ps.taxa)$Sex)
+sample_data(ps.taxa)$Sex <- relevel(sample_data(ps.taxa)$Sex, "Female")
+
+# ancombc2
+output = ancombc2(data = ps.taxa, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "Sex", rand_formula = NULL,
+                  p_adj_method = "holm", 
+                  prv_cut = 0.10, lib_cut = 1000, s0_perc = 0.05,
+                  group = "Sex", struc_zero = TRUE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 2, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, 
+                  dunnet = FALSE, trend = TRUE,
+                  iter_control = list(tol = 1e-5, max_iter = 20, 
+                                      verbose = FALSE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = NULL, 
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100), 
+                  trend_control = NULL)
+
+
+res <- output$res
+
+
+# Export the differential abundance data ##Note. data matrics as additive log-ratio (ALR)
+write.table(file = "2_OutputData/ancomSexvsFemale_Genuslfc.csv", x = res, sep=",")  
+```
+
+## Subject Group (not adjusted)
+
+```{r}
+# Data preprocessing
+sample_data(ps.rarefied)$SubjectGroup <- as.factor(sample_data(ps.rarefied)$SubjectGroup) # factorize
+ps.taxa <- tax_glom(ps.rarefied, taxrank = 'Genus', NArm = FALSE)
+
+# Assign the "Comparator" group to be used in ancombc2
+sample_data(ps.taxa)$SubjectGroup <- as.factor(sample_data(ps.taxa)$SubjectGroup)
+sample_data(ps.taxa)$SubjectGroup <- relevel(sample_data(ps.taxa)$SubjectGroup, "Nonsmoker")
+
+# ancombc2
+output = ancombc2(data = ps.taxa, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "SubjectGroup", rand_formula = NULL,
+                  p_adj_method = "holm", 
+                  prv_cut = 0.10, lib_cut = 1000, s0_perc = 0.05,
+                  group = "SubjectGroup", struc_zero = TRUE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 2, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, 
+                  dunnet = TRUE, trend = TRUE,
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = FALSE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(), 
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100), 
+                  trend_control = list(contrast = list(matrix(c(1, 0, -1, 1), nrow = 2, byrow = TRUE), matrix(c(-1, 0, 1, -1), nrow = 2, byrow = TRUE)), node = list(2, 2), solver = "ECOS", B = 10))
+
+res <- output$res
+res_global <- output$res_global
+res_trend <- output$res_trend
+
+
+# Export the differential abundance data ##Note. data matrics as additive log-ratio (ALR)
+write.table(file = "2_OutputData/ancomSmokingGroupsvsnon_smokers_Genuslfc.csv", x = res, sep=",")  
+write.table(file = "2_OutputData/ancom_trend_SmokingGroupsvsnon_smokers_Genuslfc.csv", x = res_trend, sep=",")  
+```
+
+## Subject Group (adjusted for sex)
+
+```{r}
+# Data preprocessing
+sample_data(ps.rarefied)$SubjectGroup <- as.factor(sample_data(ps.rarefied)$SubjectGroup) # factorize
+ps.taxa <- tax_glom(ps.rarefied, taxrank = 'Genus', NArm = FALSE)
+
+# Assign the "Comparator" group to be used in ancombc2
+sample_data(ps.taxa)$SubjectGroup <- as.factor(sample_data(ps.taxa)$SubjectGroup)
+sample_data(ps.taxa)$SubjectGroup <- relevel(sample_data(ps.taxa)$SubjectGroup, "Nonsmoker")
+
+
+# ancombc2
+output = ancombc2(data = ps.taxa, assay_name = "counts", tax_level = "Genus",
+                  fix_formula = "SubjectGroup + Sex", rand_formula = NULL,
+                  p_adj_method = "holm", 
+                  prv_cut = 0.10, lib_cut = 1000, s0_perc = 0.05,
+                  group = "SubjectGroup", struc_zero = TRUE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 2, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, 
+                  dunnet = TRUE, trend = TRUE,
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = FALSE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(), 
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100), 
+                  trend_control = list(contrast = list(matrix(c(1, 0, -1, 1), nrow = 2, byrow = TRUE), matrix(c(-1, 0, 1, -1), nrow = 2, byrow = TRUE)), node = list(2, 2), solver = "ECOS", B = 10))
+
+res <- output$res
+res_global <- output$res_global
+res_trend <- output$res_trend
+
+# Export the differential abundance data ##Note. data matrics as additive log-ratio (ALR)
+write.table(file = "2_OutputData/ancom_SmokingGroupsvsnon_smokers_adjustedbyzex_Genuslfc.csv", x = res, sep=",")  
+write.table(file = "2_OuputData/ancom_trend_SmokingGroupsvsnon_smokers_adjustedbyzex_Genuslfc.csv", x = res_trend, sep=",")  
+```
+
+# High vs. Low Cotinine Analysis
+
+## Data cleaning
+
+```{r}
+# Categorizing SerumCotinineELISA variable
+# Removing non-somker group due to 0 values for this variable
+
+ps3 <- ps.rarefied
+ps3@sam_data$SerumCotinineELISA <- as.numeric(ps3@sam_data$SerumCotinineELISA)
+ps3 <- subset_samples(ps3, !SubjectGroup == "Nonsmoker")
+
+# Finding 2groups, Tertiles and Quartiles
+quantile(ps3@sam_data$SerumCotinineELISA, probs = seq(0, 1, 1/2)) 
+quantile(ps3@sam_data$SerumCotinineELISA, probs = seq(0, 1, 1/3)) 
+quantile(ps3@sam_data$SerumCotinineELISA, probs = seq(0, 1, 1/4)) 
+
+# Creating a new variable and assigning categories
+ps3 <- ps3 %>% ps_mutate(cotinine = as.numeric(SerumCotinineELISA))
+
+# Two groups chosen due to low sample size
+ps3@sam_data$cotinine <- cut(ps3@sam_data$cotinine, 
+                             breaks=c(-Inf, 151.1088, Inf), 
+                             labels=c("low","high"))
+
+
+#Export metadata with cotinine metrics and plot in GraphPad Prism
+meta_cotinine <- data.frame(sample_data(ps3))
+write.table(file = "2_OutputData/cotinine_data.csv", x = meta_cotinine, sep=",")  
+```
+
+# PCoA and PERMANOVA
+
+```{r message = FALSE}
+# Subset samples based on a given condition
+ps.rarefied.smok2 <- subset_samples(ps3, SubjectGroup=="Smoker")
+ps.rarefied.ecig2 <- subset_samples(ps3, SubjectGroup=="Ecig")
+```
+
+
+## Smokers
+```{r}
+## PcoA by cotinine
+dist = phyloseq::distance(ps.rarefied.smok2, method="unifrac")
+ordination = ordinate(ps.rarefied.smok2, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied.smok2, ordination, color = "cotinine") +
+  scale_color_manual(values = c("#AFB20D", "#108080"), name = "Cotinine", labels = c("Low", "High")) +
+  geom_point(size = 4, shape = 15) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right",
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
+
+ggsave("3_OutputFigures/Fig4D_Smoker_Cotinine_PCoA.png", device = "png", width = 6, height = 3.5, units = "in")
+```
+
+```{r}
+## PERMANOVA by cotinine
+metadata2 <- data.frame(sample_data(ps.rarefied.smok2))
+test.adonis <- adonis2(dist ~ cotinine, data = metadata2)
+test.adonis
+
+# Pairwise PERMANOVA by cotinine
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$cotinine)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+
+## E-Cig Users
+
+```{r}
+## PcoA by cotinine in ecig users
+dist = phyloseq::distance(ps.rarefied.ecig2, method="unifrac")
+ordination = ordinate(ps.rarefied.ecig2, method="PCoA", distance=dist)
+
+plot_ordination(ps.rarefied.ecig2, ordination, color = "cotinine") +
+  scale_color_manual(values = c("#AFB20D", "#108080"), name = "Cotinine", labels = c("Low", "High")) +
+  geom_point(size = 4, shape = 17) +
+  stat_ellipse(type='t',size =1) +
+  theme_classic(base_size = 20) +
+  theme(strip.background = element_blank(), legend.position = "right",
+        axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14))
+
+ggsave("3_OutputFigures/Fig4E_ECig_Cotinine_PCoA.png", device = "png", width = 6, height = 3.5, units = "in")
+```
+
+```{r}
+## PERMANOVA by Cotinine
+
+metadata2 <- data.frame(sample_data(ps.rarefied.ecig2))
+test.adonis <- adonis2(dist ~ cotinine, data = metadata2)
+test.adonis
+
+# Pairwise PERMANOVA by Cotinine
+
+pairwisePVA <-pairwiseAdonis::pairwise.adonis(dist, metadata2$cotinine)
+pairwisePVA[,3:5] <- round(pairwisePVA[,3:5],2)  
+pairwisePVA
+```
+
+# Relative abundance plotting
+
+## Smokers
+
+```{r message = FALSE, warning = FALSE}
+# Averaging relative abundance by the variable "cotinine"
+ps_mergedgroup <- merge_samples(ps.rarefied.smok2, "cotinine")
+sample_data(ps_mergedgroup)$cotinine <- levels(sample_data(ps.rarefied.smok2)$cotinine)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_cotinine_Smokersonly_species.csv", x = ps.melt_sum, sep=",")  
+```
+
+## E-Cig Users
+
+```{r}
+# Averaging relative abundance by the variable "cotinine"
+ps_mergedgroup <- merge_samples(ps.rarefied.ecig2 , "cotinine")
+sample_data(ps_mergedgroup)$cotinine <- levels(sample_data(ps.rarefied.ecig2)$cotinine)
+ps_mergedgroup2 <- tax_select(ps_mergedgroup, tax_list = "Unclassified", ranks_searched = "Species", deselect = TRUE)
+ps_mergedgroup2 <- transform_sample_counts(ps_mergedgroup2, function(x) 100 * x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(ps_mergedgroup2, taxrank = 'Species', NArm = FALSE)
+ps.melt <- psmelt(glom)
+# change to character for easy-adjusted level
+ps.melt$Species <- as.character(ps.melt$Species)
+
+ps.melt <- ps.melt %>%
+  group_by(Sample, Species) %>%
+  mutate(median=median(Abundance))
+# select group mean > 1
+keep <- unique(ps.melt$Species[ps.melt$median > 1])
+ps.melt$Species[!(ps.melt$Species %in% keep)] <- "< 1% other taxa"
+#to get the same rows together
+ps.melt_sum <- ps.melt %>%
+  group_by(Sample,Species) %>%
+  summarise(Abundance=sum(Abundance))
+
+# To export and plot it in GraphPad Prism
+write.table(file = "2_OutputData/Rel_abn_cotinine_Ecigonly_species.csv", x = ps.melt_sum, sep=",")  
+```
+
+# Differential Abundance Analysis (ANCOM-BC2)
+
+Adjusted by subject group and sex.
+```{r}
+## Preprocessing of dataset
+sample_data(ps3)$cotinine <- as.factor(sample_data(ps3)$cotinine) # factorize
+ps.taxa <- tax_glom(ps3, taxrank = 'Species', NArm = FALSE)
+
+# Assign the "Comparator" group to be used in ancombc2
+sample_data(ps.taxa)$cotinine <- as.factor(sample_data(ps.taxa)$cotinine)
+sample_data(ps.taxa)$cotinine <- relevel(sample_data(ps.taxa)$cotinine, "lower")
+
+# ancombc2
+output = ancombc2(data = ps.taxa, assay_name = "counts", tax_level = "Species",
+                  fix_formula = "cotinine + SubjectGroup + Sex", rand_formula = NULL,
+                  p_adj_method = "holm", 
+                  prv_cut = 0.10, lib_cut = 1000, s0_perc = 0.05,
+                  group = "cotinine", struc_zero = TRUE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 2, verbose = TRUE,
+                  global = TRUE, pairwise = TRUE, 
+                  dunnet = TRUE, trend = TRUE,
+                  iter_control = list(tol = 1e-2, max_iter = 20, 
+                                      verbose = FALSE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(), 
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100), 
+                  trend_control = list(contrast = list(matrix(c(1, 0, -1, 1), nrow = 2, byrow = TRUE), matrix(c(-1, 0, 1, -1), nrow = 2, byrow = TRUE)), node = list(2, 2), solver = "ECOS", B = 10))
+
+res <- output$res
+res_global <- output$res_global
+res_trend <- output$res_trend
+
+
+# Export the differential abundance data ##Note. data matrics as additive log-ratio (ALR)
+write.table(file = "2_OutputData/ancomCotinineGroupsvslow_adjustedbysmoking_andSex_Specieslfc.csv", x = res, sep=",")  
+write.table(file = "2_OutputData/ancom_trend_CotinineGroupsvslow_adjustedbySex_Specieslfc.csv", x = res_trend, sep=",")  
+```
+
